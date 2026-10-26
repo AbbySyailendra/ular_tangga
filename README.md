@@ -1,0 +1,49 @@
+# Snake & Ladder 3D
+
+Ular Tangga 3D berbasis web (Three.js + Vite + TypeScript). Spesifikasi lengkap: [snake-ladder-3d-spec.md](./snake-ladder-3d-spec.md).
+
+**Mode:** Single Player vs Komputer (1–3 bot) dan **Multiplayer Online** (room dengan kode, 2–4 pemain,
+server authoritative). Hot-seat (satu perangkat) belum ada.
+
+## Perintah
+
+```bash
+npm install
+npm run dev      # client saja (Vite); tambah ?speed=4 di URL untuk mempercepat animasi saat uji
+npm run dev:all  # client + server multiplayer sekaligus (client bisa dibuka dari HP lewat IP LAN)
+npm run server   # server multiplayer saja (port 3001, ubah dengan PORT=...)
+npm start        # build client lalu server menyajikan client + soket di satu port (cocok untuk LAN/hosting)
+npm run build    # tsc --noEmit && vite build
+npm test         # Vitest — aturan permainan + integrasi server multiplayer (game 4 pemain penuh)
+npm run lint
+```
+
+## Multiplayer online
+
+- Menu **Main Online** → *Buat Room* (dapat kode 6 karakter + tombol salin kode/link `?room=KODE`) atau *Gabung* dengan kode.
+- Room **2–4 pemain**: tiap pemain memilih karakter (tidak boleh kembar), non-host menekan *Siap*, host mengatur papan/aturan lalu *Mulai*.
+- **Server authoritative** (`server/Room.ts`): RNG dadu & validasi giliran di server; client hanya mengirim `roll`. Lemparan "sempurna" dinilai server dari selisih waktu `charge_start` → `roll`. Client mereplikasi aturan dari hasil server dan mengikuti server bila berbeda.
+- Giliran 25 dtk (+ waktu animasi) → auto-roll bila AFK. Pemain terputus dimainkan otomatis dan bisa masuk lagi (token di `localStorage`, juga setelah refresh) dan mendapat snapshot state; di lobby slot dilepas setelah 20 dtk. Room kosong dihapus setelah 60 dtk.
+- Emote 👏😂😱🎉 antar pemain, timer giliran, penanda pemain terputus.
+- Variabel: `PORT`, `CLIENT_ORIGIN` (CORS, pisahkan koma) di server; `VITE_SERVER_URL` di client bila server beda origin. Saat `npm run dev`, `/socket.io` di-proxy ke `localhost:3001`.
+- Main bareng teman di jaringan yang sama: `npm run dev:all`, buka `http://<IP-PC>:5173` dari perangkat lain.
+
+## Performa
+
+Beban terbesar ada di GPU (resolusi/fill-rate, bloom, bayangan), bukan logika game (~0,25 ms/frame JS). Pixel ratio dibatasi 1,5; bloom setengah resolusi; bayangan 1024; MSAA kanvas dimatikan; efek partikel tidur saat tidak ada. Kualitas *Otomatis* memantau FPS: menurunkan resolusi lalu mematikan bloom/bayangan bila lambat (Pengaturan → Kualitas: Otomatis / Tinggi / Sedang / Rendah).
+
+## Yang sudah ada
+
+- Papan 3D 10×10 zig-zag, 4 preset (Mudah / Normal / Kacau / Acak tervalidasi), ular (tube meruncing + kepala beranimasi), tangga menyala berurutan, dadu 3D dengan hasil ditentukan dulu.
+- 6 karakter prosedural (placeholder model GLB) dengan animasi idle / hop / climb / scared / cheer / sad, label nama, emote bot sesuai kepribadian.
+- State machine giliran + EventBus; `Rules.ts` / `GameState.ts` bebas Three.js (aturan 6 = lempar lagi maks 3x, harus pas 100 dengan pantulan, opsi dimatikan lewat setup).
+- Lempar dadu dengan **tahan & lepas**: bar tenaga terisi 1,8 dtk; lepas di zona hijau (≥ 88%) = lemparan sempurna (dua dadu, diambil yang terbesar: peluang angka 6 naik 16,7% → 30,6%). Menahan terlalu lama setelah penuh = tenaga hangus, lemparan biasa. Hanya untuk pemain; bot tetap lemparan biasa.
+- Audio sintetis WebAudio (tanpa file aset): 4 musik 8-bar (menu/game/tension/victory, crossfade) dengan bass, drum, marimba, melodi ber-vibrato + echo/reverb; SFX langkah (marimba pentatonik naik tiap petak), tangga (arpeggio harpa + akor berkilau), ular (desis → gigit → slide whistle → trombon sedih), bar tenaga, dll; volume Master/Musik/SFX + mute tersimpan.
+- Efek: confetti, kembang api, percikan, bloom ringan, screen shake, kamera mengikuti pion + cut sinematik, podium 3D juara.
+- UI: loading, menu, setup + pratinjau 3D, HUD, pause, victory, pengaturan, cara main; ID/EN; kontras tinggi; kurangi gerakan; kualitas Low otomatis di perangkat lemah; save/resume per giliran.
+
+## Penyimpangan dari spek
+
+- Howler.js & cannon-es tidak dipakai: audio disintesis dengan WebAudio, dadu memakai opsi A (GSAP).
+- Pemenang ditentukan saat pemain pertama tiba di 100; peringkat lain berdasar posisi saat itu (tidak lanjut main sampai semua selesai).
+- Model GLB belum ada; karakter prosedural.

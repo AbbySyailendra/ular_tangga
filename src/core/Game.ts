@@ -1,0 +1,451 @@
+import gsap from 'gsap';
+import { BOARD_PRESETS, CHARACTERS, PERSONALITIES, PLAYER_COLORS, TILE_COUNT, type BoardPresetId } from '../config';
+import type { AudioManager } from '../audio/AudioManager';
+import { t } from '../i18n';
+import { AIController, type ReactionEvent } from '../players/AIController';
+import { HumanController, type RollInput } from '../players/HumanController';
+import type { NetworkClient } from '../network/NetworkClient';
+import type { ServerMsg } from '../network/protocol';
+import type { SceneManager } from '../scene/SceneManager';
+import type { Stage } from '../scene/Stage';
+import { createRng, randomSeed, type Rng } from '../utils/random';
+import { settings } from '../utils/settings';
+import { EventBus } from './EventBus';
+import { createInitialState, currentPlayer, type GameState, type PlayerState } from './GameState';
+import { StateMachine } from './StateMachine';
+import { applyRoll, generateRandomBoard, rollDie, type RuleOptions } from './Rules';
+
+export interface GameConfig {
+  playerName: string;
+  characterId: string;
+  botCount: number;
+  boardPreset: BoardPresetId;
+  options: RuleOptions;
+}
+
+export interface SaveData {
+  config: GameConfig;
+  state: GameState;
+}
+
+const SAVE_KEY = 'sl3d.save';
+/** hanya dev: ?speed=4 mempercepat seluruh animasi untuk pengujian */
+const DEV_SPEED = import.meta.env.DEV ? Number(new URLSearchParams(location.search).get('speed')) || 1 : 1;
+
+class Cancelled extends Error {}
+
+type TurnResult = Extract<ServerMsg, { t: 'turn_result' }>;
+
+export function readSave(): SaveData | null {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as SaveData;
+    return data.state && !data.state.winnerId ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearSave(): void {
+  try {
+    localStorage.removeItem(SAVE_KEY);
+  } catch {
+    /* abaikan */
+  }
+}
+
+/** Orkestrator permainan: menjalankan giliran, memicu animasi (Stage) dan event (EventBus). */
+export class Game {
+  readonly machine = new StateMachine((from, to) => this.bus.emit('phase', { from, to }));
+  state!: GameState;
+  config!: GameConfig;
+  paused = false;
+
+  private rng: Rng = createRng(1);
+  private token = 0;
+  private human = new HumanController();
+  private ais = new Map<string, AIController>();
+
+  /** mode online: koneksi ke server; null = main lawan komputer */
+  online: NetworkClient | null = null;
+  /** online: menu jeda hanya tampilan (permainan tetap jalan karena pemain lain menunggu) */
+  menuOpen = false;
+  private offs: (() => void)[] = [];
+  private results: TurnResult[] = [];
+  private resultWaiter: (() => void) | null = null;
+
+  constructor(
+    readonly bus: EventBus,
+    private stage: Stage,
+    private scene: SceneManager,
+    private audio: AudioManager,
+  ) {}
+
+  // ───────────────────────── Siklus hidup ─────────────────────────
+
+  start(config: GameConfig): void {
+    this.cleanup();
+    const rng = createRng(randomSeed());
+    const board =
+      config.boardPreset === 'random'
+        ? generateRandomBoard(rng)
+        : structuredClone(BOARD_PRESETS[config.boardPreset]);
+
+    const chars = CHARACTERS.filter((c) => c.id !== config.characterId);
+    rng.shuffle(chars);
+    const players: Omit<PlayerState, 'position'>[] = [
+      {
+        id: 'p0',
+        name: config.playerName.trim() || t('setup.namePlaceholder'),
+        character: config.characterId,
+        color: PLAYER_COLORS[0],
+        isBot: false,
+      },
+    ];
+    for (let i = 0; i < config.botCount; i++) {
+      const c = chars[i];
+      players.push({
+        id: `p${i + 1}`,
+        name: c.id.charAt(0).toUpperCase() + c.id.slice(1),
+        character: c.id,
+        color: PLAYER_COLORS[i + 1],
+        isBot: true,
+        personality: PERSONALITIES[i % PERSONALITIES.length],
+      });
+    }
+    const state = createInitialState(players, board, config.options, rng.getState());
+    void this.begin(config, state, false);
+  }
+
+  /** Mulai (atau lanjutkan dari snapshot) permainan online; state berasal dari server. */
+  startOnline(net: NetworkClient, state: GameState, resumed: boolean): void {
+    this.cleanup(); // melepas langganan lama sebelum memasang yang baru
+    this.online = net;
+    this.results = [];
+    this.offs = [
+      net.on('turn_result', (m) => {
+        this.results.push(m);
+        this.resultWaiter?.();
+      }),
+      net.on('turn', ({ playerId, deadline }) => this.bus.emit('turn:deadline', { playerId, deadline })),
+      net.on('emote', ({ playerId, id }) => this.stage.characters.get(playerId)?.showEmote(id)),
+      net.on('room_state', ({ room }) => this.bus.emit('net:room', { room })),
+    ];
+    // tombol lempar ditahan: beri tahu server kapan mulai mengisi tenaga (server yang menilai "sempurna")
+    this.offs.push(this.bus.on('charge:start', () => net.send({ t: 'charge_start' })));
+    const config: GameConfig = {
+      playerName: '',
+      characterId: '',
+      botCount: 0,
+      boardPreset: 'normal',
+      options: state.options,
+    };
+    void this.begin(config, state, resumed);
+  }
+
+  resume(save: SaveData): void {
+    this.cleanup();
+    void this.begin(save.config, save.state, true);
+  }
+
+  private async begin(config: GameConfig, state: GameState, resumed: boolean): Promise<void> {
+    const token = ++this.token;
+    this.config = config;
+    this.state = state;
+    this.rng = createRng(1);
+    this.rng.setState(state.rngState);
+    this.ais.clear();
+    for (const p of state.players) if (p.isBot) this.ais.set(p.id, new AIController(p.personality ?? 'cheerful'));
+
+    this.stage.setBoardMap(state.board);
+    this.stage.setPlayers(state.players);
+    this.stage.camera.attract(false);
+    this.audio.playMusic('game');
+    this.audio.setTension(state.players.some((p) => p.position >= 90));
+    this.bus.emit('game:start', { playerIds: state.players.map((p) => p.id) });
+
+    try {
+      if (!resumed) {
+        this.machine.go('INTRO');
+        this.bus.emit('ui:banner', { text: t('banner.ready') });
+        await this.stage.camera.intro();
+        this.check(token);
+      }
+      while (!this.state.winnerId) await this.playTurn(token);
+      await this.finish(token);
+    } catch (e) {
+      if (!(e instanceof Cancelled)) throw e;
+    }
+  }
+
+  private check(token: number): void {
+    if (token !== this.token) throw new Cancelled();
+  }
+
+  /** Hentikan game berjalan dan bersihkan semuanya (kembali ke menu). */
+  exit(): void {
+    this.cleanup();
+    this.token++;
+    this.audio.playMusic('menu');
+    this.stage.camera.resetView(false);
+    this.stage.camera.attract(true);
+    this.bus.emit('game:exit', {});
+  }
+
+  private cleanup(): void {
+    this.offs.forEach((off) => off());
+    this.offs = [];
+    this.online = null;
+    this.menuOpen = false;
+    this.results = [];
+    this.resultWaiter = null;
+    gsap.globalTimeline.clear();
+    gsap.globalTimeline.paused(false).timeScale(DEV_SPEED);
+    this.scene.timeScale = 1;
+    this.paused = false;
+    this.human.cancel();
+    this.stage.reset();
+    this.machine.reset();
+  }
+
+  togglePause(): void {
+    if (this.machine.phase === 'LOBBY' || this.machine.phase === 'GAME_OVER') return;
+    if (this.online) {
+      // online tidak bisa membekukan permainan: hanya membuka/menutup menu
+      this.menuOpen = !this.menuOpen;
+      this.bus.emit('pause', { paused: this.menuOpen });
+      return;
+    }
+    this.paused = !this.paused;
+    gsap.globalTimeline.paused(this.paused);
+    this.scene.timeScale = this.paused ? 0 : 1;
+    this.audio.setDuck(this.paused ? 0.3 : 1);
+    this.bus.emit('pause', { paused: this.paused });
+  }
+
+  // ───────────────────────── Input ─────────────────────────
+
+  /** Apakah pemain ini dikendalikan perangkat ini (online: id sendiri; lokal: manusia). */
+  isMine(playerId: string): boolean {
+    if (this.online) return playerId === this.online.myId;
+    return !(this.state.players.find((p) => p.id === playerId)?.isBot ?? true);
+  }
+
+  get humanTurn(): boolean {
+    return !!this.state && this.isMine(currentPlayer(this.state).id);
+  }
+
+  canRoll(): boolean {
+    return this.machine.phase === 'AWAIT_ROLL' && this.humanTurn && !this.paused && this.human.waiting;
+  }
+
+  requestRoll(input: RollInput = { boost: false }): void {
+    if (this.canRoll()) this.human.trigger(input);
+  }
+
+  private resultAvailable(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.results.length > 0) resolve();
+      else this.resultWaiter = resolve;
+    });
+  }
+
+  /** Menunggu hasil lemparan berikutnya dari server (antrean menjaga urutan bila datang lebih awal). */
+  private nextResult(): Promise<TurnResult> {
+    return new Promise((resolve) => {
+      const take = () => {
+        const r = this.results.shift();
+        if (r) {
+          this.resultWaiter = null;
+          resolve(r);
+        } else {
+          this.resultWaiter = take;
+        }
+      };
+      take();
+    });
+  }
+
+  /** Simulasi lokal harus sama dengan server; bila tidak, ikuti server (ia yang berwenang). */
+  private reconcile(local: GameState, server: TurnResult['after']): void {
+    const same =
+      local.current === server.current &&
+      local.winnerId === server.winnerId &&
+      local.players.every((p, i) => p.position === server.positions[i]);
+    if (same) return;
+    console.warn('[online] state lokal berbeda dari server, mengikuti server');
+    local.players.forEach((p, i) => (p.position = server.positions[i]));
+    local.current = server.current;
+    local.consecutiveSixes = server.consecutiveSixes;
+    local.turn = server.turn;
+    local.winnerId = server.winnerId;
+    local.ranking = server.ranking;
+  }
+
+  /** Petak yang sedang ditampilkan untuk pemain (mengikuti animasi, bukan state akhir). */
+  displayTile(id: string): number {
+    return Math.max(0, this.stage.characters.get(id)?.tile ?? 0);
+  }
+
+  // ───────────────────────── Giliran ─────────────────────────
+
+  private async playTurn(token: number): Promise<void> {
+    const player = currentPlayer(this.state);
+    const id = player.id;
+
+    this.machine.go('TURN_START');
+    gsap.globalTimeline.timeScale((player.isBot && settings.get('fastBots') ? 2 : 1) * DEV_SPEED);
+    const mine = this.isMine(id);
+    this.bus.emit('turn:start', { playerId: id, index: this.state.current, isBot: player.isBot, mine });
+    this.stage.focusPlayer(id);
+    if (!this.online) this.saveGame();
+    this.audio.setTension(this.state.players.some((p) => p.position >= 90));
+    this.bus.emit('ui:banner', { text: this.online && mine ? t('hud.yourTurn') : t('hud.turn', { name: player.name }) });
+    await this.stage.sleep(0.9);
+    this.check(token);
+
+    // 1) menunggu lemparan
+    this.machine.go('AWAIT_ROLL');
+    let boost = false;
+    let value: number;
+    let serverAfter: TurnResult['after'] | null = null;
+    if (this.online) {
+      // server authoritative: pemain yang gilirannya mengirim niat 'roll', hasilnya datang dari server
+      if (mine) {
+        const net = this.online;
+        const rolled = this.human.requestRoll().then(() => net.send({ t: 'roll' }));
+        // bila waktu habis, server melempar otomatis dan hasilnya datang tanpa menunggu tombol
+        await Promise.race([rolled, this.resultAvailable()]);
+        this.human.cancel();
+        this.check(token);
+      }
+      const res = await this.nextResult();
+      this.check(token);
+      this.machine.go('ROLLING');
+      value = res.value;
+      boost = res.boost;
+      serverAfter = res.after;
+    } else {
+      if (player.isBot) {
+        await this.stage.sleep(this.ais.get(id)!.thinkTime());
+      } else {
+        boost = (await this.human.requestRoll()).boost;
+      }
+      this.check(token);
+      // 2) dadu: hasil ditentukan lebih dulu oleh RNG, animasi hanya menampilkan
+      this.machine.go('ROLLING');
+      value = rollDie(this.rng, boost);
+    }
+    if (boost) {
+      this.bus.emit('dice:boost', { playerId: id });
+      this.bus.emit('ui:banner', { text: t('banner.perfect'), kind: 'bonus' });
+    }
+    this.bus.emit('dice:throw', { playerId: id });
+    await this.stage.rollDice(value);
+    this.check(token);
+    this.bus.emit('dice:rolled', { playerId: id, value });
+    this.bus.emit('ui:log', { text: t('log.roll', { name: player.name, value }) });
+
+    const { state: next, outcome } = applyRoll(this.state, value);
+    if (serverAfter) this.reconcile(next, serverAfter);
+    else next.rngState = this.rng.getState();
+    this.state = next;
+
+    if (outcome.forfeited) {
+      this.bus.emit('turn:forfeit', { playerId: id });
+      this.bus.emit('ui:banner', { text: t('banner.forfeit'), kind: 'bad' });
+      this.bus.emit('ui:log', { text: t('log.forfeit', { name: player.name }) });
+      void this.stage.pulsePose(id, 'sad', 1.4);
+      await this.stage.sleep(1.5);
+      this.check(token);
+      this.machine.go('NEXT_TURN');
+      return;
+    }
+
+    // 3) pion melangkah petak demi petak
+    this.machine.go('MOVING');
+    const move = outcome.move!;
+    await this.stage.sleep(0.25);
+    for (const [i, tile] of move.path.entries()) {
+      await this.stage.hopStep(id, tile);
+      this.check(token);
+      this.bus.emit('move:step', { playerId: id, tile, stepIndex: i, total: move.path.length });
+      if (move.bounced && tile === TILE_COUNT && i < move.path.length - 1) {
+        this.bus.emit('move:bounce', { playerId: id, at: tile });
+        this.bus.emit('ui:log', { text: t('log.bounce', { name: player.name }) });
+      }
+    }
+
+    // 4) ular / tangga
+    this.machine.go('RESOLVE_TILE');
+    if (move.jump?.kind === 'ladder') {
+      const { from, to } = move.jump;
+      const duration = this.stage.climbDuration(this.stage.ladderAt(from)) / gsap.globalTimeline.timeScale();
+      this.bus.emit('ladder:climb', { playerId: id, from, to, duration });
+      this.bus.emit('ui:log', { text: t('log.ladder', { name: player.name, from, to }) });
+      this.react(id, 'self_ladder', 'other_ladder');
+      await this.stage.climb(id, this.stage.ladderAt(from));
+    } else if (move.jump?.kind === 'snake') {
+      const { from, to } = move.jump;
+      const duration = this.stage.slideDuration(this.stage.snakeAt(from)) / gsap.globalTimeline.timeScale();
+      this.bus.emit('snake:bite', { playerId: id, from, to, duration });
+      this.bus.emit('ui:log', { text: t('log.snake', { name: player.name, from, to }) });
+      this.react(id, 'self_snake', 'other_snake');
+      await this.stage.slide(id, this.stage.snakeAt(from));
+    } else {
+      this.stage.settle(id);
+      await this.stage.sleep(0.3);
+    }
+    this.check(token);
+    this.bus.emit('move:step', { playerId: id, tile: move.final, stepIndex: move.path.length, total: move.path.length });
+
+    // 5) menang / lempar lagi / giliran berikutnya
+    this.machine.go('CHECK_WIN');
+    if (outcome.won) return;
+    if (outcome.extraTurn) {
+      this.bus.emit('bonus:six', { playerId: id, count: this.state.consecutiveSixes });
+      this.bus.emit('ui:banner', { text: t('banner.six'), kind: 'bonus' });
+      this.bus.emit('ui:log', { text: t('log.six', { name: player.name }) });
+      await this.stage.sleep(0.7);
+      this.check(token);
+      return;
+    }
+    this.machine.go('NEXT_TURN');
+  }
+
+  private async finish(token: number): Promise<void> {
+    const ranking = this.state.ranking;
+    const winnerId = ranking[0];
+    this.machine.go('GAME_OVER');
+    gsap.globalTimeline.timeScale(DEV_SPEED);
+    clearSave();
+    this.bus.emit('game:win', { playerId: winnerId, ranking });
+    this.react(winnerId, 'win', 'lose');
+    await this.stage.showPodium(ranking);
+    this.check(token);
+  }
+
+  // ───────────────────────── Bantu ─────────────────────────
+
+  /** Bot bereaksi dengan emote sesuai kepribadiannya (tanpa memengaruhi hasil game). */
+  private react(actorId: string, selfEvent: ReactionEvent, otherEvent: ReactionEvent): void {
+    for (const [pid, ai] of this.ais) {
+      const emoji = ai.react(pid === actorId ? selfEvent : otherEvent);
+      if (emoji) {
+        const ch = this.stage.characters.get(pid);
+        window.setTimeout(() => ch?.showEmote(emoji), 500 + Math.random() * 700);
+      }
+    }
+  }
+
+  private saveGame(): void {
+    if (this.state.winnerId) return;
+    try {
+      const data: SaveData = { config: this.config, state: this.state };
+      localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    } catch {
+      /* abaikan */
+    }
+  }
+}

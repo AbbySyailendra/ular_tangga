@@ -145,6 +145,11 @@ export class RoomManager {
       case 'emote':
         room.emote(playerId, String(msg.id));
         break;
+      case 'sync': {
+        const me = room.player(playerId);
+        if (me) room.resync(me);
+        break;
+      }
       case 'back_to_lobby':
         room.backToLobby();
         break;

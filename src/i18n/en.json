@@ -144,5 +144,13 @@
   "net.aborted": "The other players left the room. Back to the lobby.",
   "hud.timer": "Time left",
   "hud.offline": "offline",
-  "emote.title": "Emote"
+  "emote.title": "Emote",
+  "net.attempt": "Attempt {n}… the game keeps running on the server.",
+  "net.keepOpen": "Keep this page open. The game keeps running on the server.",
+  "net.retryNow": "Reconnect now",
+  "net.leave": "Leave to menu",
+  "net.restoring": "Reconnecting to your room…",
+  "net.restoringSub": "Your last room session was found.",
+  "net.expired": "The room session has ended (room closed or server restarted).",
+  "net.reconnected": "Reconnected"
 }

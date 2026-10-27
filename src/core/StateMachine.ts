@@ -11,8 +11,8 @@ export type Phase =
   | 'GAME_OVER';
 
 const TRANSITIONS: Record<Phase, Phase[]> = {
-  // TURN_START langsung dari LOBBY dipakai saat melanjutkan game tersimpan
-  LOBBY: ['INTRO', 'TURN_START'],
+  // TURN_START langsung dari LOBBY: melanjutkan game; GAME_OVER: masuk kembali ke game online yang sudah selesai
+  LOBBY: ['INTRO', 'TURN_START', 'GAME_OVER'],
   INTRO: ['TURN_START'],
   TURN_START: ['AWAIT_ROLL'],
   AWAIT_ROLL: ['ROLLING'],

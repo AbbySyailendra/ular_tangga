@@ -8,10 +8,12 @@ import { SceneManager } from './scene/SceneManager';
 import { Stage } from './scene/Stage';
 import { CharacterSelect } from './ui/CharacterSelect';
 import { HUD } from './ui/HUD';
+import { ConnectionOverlay } from './ui/ConnectionOverlay';
 import { Lobby } from './ui/Lobby';
 import { Loading } from './ui/Loading';
 import { MainMenu } from './ui/MainMenu';
 import { HowToPlay, PauseMenu, SettingsPanel } from './ui/Modals';
+import { toast } from './ui/toast';
 import { VictoryScreen } from './ui/VictoryScreen';
 import { t } from './i18n';
 import { settings } from './utils/settings';
@@ -140,7 +142,17 @@ async function boot(): Promise<void> {
     },
   });
 
-  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, victory.el, pause.el, howTo.el, settingsPanel.el);
+  const netOverlay = new ConnectionOverlay(net, {
+    onLeave: () => {
+      net.leave();
+      if (game.online) game.exit();
+      lobby.hide();
+      goMenu();
+      netOverlay.update();
+    },
+  });
+
+  uiRoot.append(menu.el, setup.el, lobby.el, hud.el, victory.el, pause.el, howTo.el, settingsPanel.el, netOverlay.el);
 
   // suara tombol (delegasi)
   uiRoot.addEventListener('click', (e) => {
@@ -151,9 +163,21 @@ async function boot(): Promise<void> {
     if (b && !b.contains(e.relatedTarget as Node | null)) audio.playSfx('hover');
   });
 
-  // tab disembunyikan -> jeda otomatis
+  // Tab di latar belakang: browser menghentikan requestAnimationFrame (animasi membeku). Game lokal cukup
+  // berhenti di tempat lalu lanjut mulus; game online terus berjalan di server, jadi saat tab aktif lagi
+  // client mengambil snapshot terbaru dan melompat ke keadaan sekarang (bukan memutar ulang giliran lama).
+  let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && !game.paused && !game.online) game.togglePause();
+    if (document.hidden) {
+      hiddenAt = Date.now();
+      audio.suspend();
+      return;
+    }
+    audio.resume();
+    if (!game.online) return;
+    net.ensureConnected();
+    const away = Date.now() - hiddenAt;
+    if (away > 1500 && game.machine.phase !== 'GAME_OVER' && net.status === 'connected') net.sync();
   });
 
   if (import.meta.env.DEV) {
@@ -181,10 +205,13 @@ async function boot(): Promise<void> {
   });
   net.on('error', ({ code }) => {
     // sesi room lama sudah tidak ada (server restart / room bubar): kembali ke menu
-    if (code === 'rejoin_failed' && autoRejoin) {
+    if (code === 'rejoin_failed') {
       autoRejoin = false;
+      lobby.setRestoring(false);
+      if (game.online) game.exit();
       lobby.hide();
       goMenu();
+      toast(t('net.expired'), 'bad');
     }
   });
   net.on('room_state', ({ room }) => {
@@ -200,10 +227,9 @@ async function boot(): Promise<void> {
     if (!game.online) return;
     if (s === 'disconnected') {
       wasOffline = true;
-      bus.emit('ui:banner', { text: t('net.lost'), kind: 'bad' });
     } else if (s === 'connected' && wasOffline) {
       wasOffline = false;
-      bus.emit('ui:banner', { text: t('net.back'), kind: 'info' });
+      toast(t('net.reconnected'), 'good');
     }
   });
 
@@ -220,7 +246,9 @@ async function boot(): Promise<void> {
     history.replaceState(null, '', location.pathname);
     lobby.show(inviteCode);
   } else if (autoRejoin) {
-    lobby.show(); // mencoba masuk kembali ke room terakhir (mis. setelah refresh)
+    // mencoba masuk kembali ke room terakhir (mis. setelah tab tertutup / refresh)
+    lobby.setRestoring(true);
+    lobby.show();
   } else {
     goMenu();
   }

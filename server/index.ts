@@ -41,7 +41,8 @@ const http = createServer((req, res) => {
   createReadStream(file).pipe(res);
 });
 
-const io = new Server(http, { cors: { origin: ORIGIN } });
+// ping rapat agar koneksi putus (tab ditutup, sinyal hilang) cepat terdeteksi dan pemain lain melihat statusnya
+const io = new Server(http, { cors: { origin: ORIGIN }, pingInterval: 8000, pingTimeout: 6000 });
 io.on('connection', (socket) => manager.attach(socket));
 
 http.listen(PORT, () => console.log(`[server] Snake & Ladder 3D multiplayer di http://localhost:${PORT}`));

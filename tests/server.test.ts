@@ -271,3 +271,76 @@ describe('permainan online', () => {
     b.close();
   });
 });
+
+describe('sambung ulang', () => {
+  it('sync mengirim snapshot state terbaru saat bermain', async () => {
+    const [host, b] = await makeRoom(2);
+    b.send({ t: 'ready', ready: true });
+    await new Promise((r) => setTimeout(r, 50));
+    host.send({ t: 'start_game' });
+    await host.wait('game_start');
+    await host.wait('turn_result', 3000);
+    const from = b.msgs.length;
+    b.send({ t: 'sync' });
+    const snap = await b.wait('game_snapshot', 3000, from);
+    expect(snap.state.players).toHaveLength(2);
+    expect(snap.state.turn).toBeGreaterThan(1);
+    host.close();
+    b.close();
+  });
+
+  it('pemain terputus tetap di room dan menerima snapshot saat kembali (dua kali berturut-turut)', async () => {
+    const [host, b] = await makeRoom(2);
+    b.send({ t: 'ready', ready: true });
+    await new Promise((r) => setTimeout(r, 50));
+    host.send({ t: 'start_game' });
+    await host.wait('game_start');
+    const code = host.room!.code;
+    let token = b.token;
+    let cur = b;
+    for (let i = 0; i < 2; i++) {
+      cur.close();
+      await new Promise((r) => setTimeout(r, 60));
+      expect(host.room!.players.some((p) => !p.connected)).toBe(true);
+      const back = await open();
+      back.send({ t: 'rejoin', code, token });
+      await back.wait('game_snapshot');
+      token = (await back.wait('joined')).token;
+      expect(host.room!.players.every((p) => p.connected)).toBe(true);
+      cur = back;
+    }
+    host.close();
+    cur.close();
+  });
+
+  it('game selesai: pemain yang masuk kembali mendapat state akhir (pemenang terisi)', async () => {
+    const [host, b] = await makeRoom(2);
+    b.send({ t: 'ready', ready: true });
+    await new Promise((r) => setTimeout(r, 50));
+    host.send({ t: 'start_game' });
+    await host.wait('game_start');
+    // kedua pemain melempar begitu gilirannya tiba sampai ada pemenang
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('tidak selesai')), 25000);
+      for (const c of [host, b]) {
+        c.socket.on('msg', (m: ServerMsg) => {
+          if (m.t === 'turn' && m.playerId === c.me) c.send({ t: 'roll' });
+          if (c === host && m.t === 'turn_result' && m.after.winnerId) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+      }
+    });
+    const code = host.room!.code;
+    const token = b.token;
+    b.close();
+    await new Promise((r) => setTimeout(r, 60));
+    const back = await open();
+    back.send({ t: 'rejoin', code, token });
+    const snap = await back.wait('game_snapshot');
+    expect(snap.state.winnerId).not.toBeNull();
+    host.close();
+    back.close();
+  }, 30000);
+});

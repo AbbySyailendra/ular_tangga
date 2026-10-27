@@ -268,6 +268,15 @@ export class AudioManager {
     this.applyVolumes();
   }
 
+  /** Tab di latar belakang: hentikan audio (hemat baterai, tidak ada musik tanpa permainan yang terlihat). */
+  suspend(): void {
+    if (this.ctx?.state === 'running') void this.ctx.suspend();
+  }
+
+  resume(): void {
+    if (this.ctx?.state === 'suspended') void this.ctx.resume();
+  }
+
   /** Turunkan volume musik sementara (mis. saat pause). */
   setDuck(v: number): void {
     this.duck = v;

@@ -7,10 +7,14 @@ type MsgOf<T extends ServerMsg['t']> = Extract<ServerMsg, { t: T }>;
 type Handler<T extends ServerMsg['t']> = (msg: MsgOf<T>) => void;
 
 const SESSION_KEY = 'sl3d.session';
+/** sesi room yang lebih tua dari ini tidak dicoba lagi (room di server pasti sudah bubar) */
+const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 
 interface Session {
   code: string;
   token: string;
+  /** terakhir kali sesi ini dipakai (ms) */
+  at: number;
 }
 
 /** Pembungkus Socket.IO: koneksi, sambung ulang otomatis (rejoin), dan penyiar pesan bertipe. */
@@ -18,6 +22,8 @@ export class NetworkClient {
   status: NetStatus = 'idle';
   room: RoomInfo | null = null;
   myId = '';
+  /** nomor percobaan sambung ulang saat ini (0 = tersambung) */
+  attempts = 0;
 
   private socket: Socket | null = null;
   private handlers = new Map<string, Set<(msg: ServerMsg) => void>>();
@@ -27,10 +33,24 @@ export class NetworkClient {
   constructor() {
     try {
       const raw = localStorage.getItem(SESSION_KEY);
-      if (raw) this.session = JSON.parse(raw) as Session;
+      const s = raw ? (JSON.parse(raw) as Session) : null;
+      if (s && Date.now() - (s.at ?? 0) < SESSION_MAX_AGE_MS) this.session = s;
+      else if (s) localStorage.removeItem(SESSION_KEY);
     } catch {
       /* abaikan */
     }
+    // jaringan kembali / tab aktif lagi: jangan menunggu jeda backoff socket.io
+    window.addEventListener('online', () => this.ensureConnected());
+  }
+
+  /** Sambungkan segera bila terputus (dipanggil saat tab aktif lagi atau jaringan kembali). */
+  ensureConnected(): void {
+    if (this.socket && !this.socket.connected) this.socket.connect();
+  }
+
+  /** Minta snapshot state terbaru dari server (mengejar ketertinggalan setelah tab di latar belakang). */
+  sync(): void {
+    if (this.room) this.send({ t: 'sync' });
   }
 
   get hasSession(): boolean {
@@ -74,11 +94,20 @@ export class NetworkClient {
     const socket = url ? io(url) : io();
     this.socket = socket;
 
+    socket.io.on('reconnect_attempt', (n: number) => {
+      this.attempts = n;
+      this.setStatus('connecting');
+    });
     socket.on('connect', () => {
+      this.attempts = 0;
       this.setStatus('connected');
       if (this.session) this.send({ t: 'rejoin', code: this.session.code, token: this.session.token });
     });
-    socket.on('disconnect', () => this.setStatus('disconnected'));
+    socket.on('disconnect', (reason) => {
+      this.setStatus('disconnected');
+      // diputus oleh server (mis. tab lain mengambil sesi) tidak otomatis menyambung ulang
+      if (reason === 'io server disconnect') socket.connect();
+    });
     socket.on('connect_error', () => this.setStatus('disconnected'));
     socket.on('msg', (msg: ServerMsg) => this.receive(msg));
   }
@@ -88,10 +117,13 @@ export class NetworkClient {
       case 'joined':
         this.room = msg.room;
         this.myId = msg.you;
-        this.saveSession({ code: msg.room.code, token: msg.token });
+        this.saveSession({ code: msg.room.code, token: msg.token, at: Date.now() });
         break;
       case 'room_state':
         this.room = msg.room;
+        break;
+      case 'turn':
+        if (this.session) this.saveSession({ ...this.session, at: Date.now() }); // sesi tetap segar selama bermain
         break;
       case 'left':
         this.room = null;

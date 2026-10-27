@@ -144,5 +144,13 @@
   "net.aborted": "Pemain lain meninggalkan room. Kembali ke lobby.",
   "hud.timer": "Sisa waktu",
   "hud.offline": "terputus",
-  "emote.title": "Emote"
+  "emote.title": "Emote",
+  "net.attempt": "Percobaan ke-{n}… permainan tetap berjalan di server.",
+  "net.keepOpen": "Jangan tutup halaman ini. Permainan tetap berjalan di server.",
+  "net.retryNow": "Sambungkan sekarang",
+  "net.leave": "Keluar ke menu",
+  "net.restoring": "Menyambungkan kembali ke room…",
+  "net.restoringSub": "Sesi room terakhirmu ditemukan.",
+  "net.expired": "Sesi room sudah berakhir (room bubar atau server dimulai ulang).",
+  "net.reconnected": "Tersambung kembali"
 }

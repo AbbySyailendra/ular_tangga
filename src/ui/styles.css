@@ -1526,3 +1526,88 @@ body.rm *::after {
     top: auto;
   }
 }
+
+/* ───────── sambung ulang & toast ───────── */
+.spinner {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 5px solid #e4defa;
+  border-top-color: var(--accent);
+  animation: spin-round 0.9s linear infinite;
+}
+@keyframes spin-round {
+  to { transform: rotate(360deg); }
+}
+.net-overlay {
+  z-index: 50;
+  background: rgba(30, 18, 80, 0.62);
+  backdrop-filter: blur(5px);
+}
+.net-card {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  padding: 26px 26px 30px;
+  background: var(--card);
+  border: 4px solid var(--line);
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+}
+.net-card h3,
+.restoring h3 {
+  margin: 4px 0 0;
+  font-size: 1.35rem;
+}
+.net-card p {
+  margin: 0;
+  color: var(--ink-soft);
+}
+.net-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 8px;
+  padding-bottom: 6px;
+}
+.lobby-body.restoring {
+  align-items: center;
+  text-align: center;
+  padding: 18px 0 6px;
+}
+.toast {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(92vw, 520px);
+  padding: 12px 22px;
+  border-radius: 99px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  box-shadow: 0 8px 0 rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  animation: toast-in 0.35s cubic-bezier(0.2, 1.3, 0.4, 1) both;
+}
+.toast.good {
+  background: var(--good);
+}
+.toast.bad {
+  background: var(--bad);
+}
+.toast.out {
+  animation: toast-out 0.5s ease both;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, -24px) scale(0.9); }
+}
+@keyframes toast-out {
+  to { opacity: 0; transform: translate(-50%, -16px); }
+}

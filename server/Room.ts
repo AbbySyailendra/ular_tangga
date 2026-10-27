@@ -32,11 +32,15 @@ const TIME_SCALE = Number(process.env.SL3D_TIME_SCALE ?? 1);
 const ms = (v: number) => v * TIME_SCALE;
 const LOBBY_GRACE_MS = 20_000;
 const EMPTY_ROOM_MS = 60_000;
+/** pemain terputus masih dianggap bisa kembali selama ini; lewat itu giliran mereka dimainkan otomatis (cepat) */
+const RECONNECT_GRACE_MS = 45_000;
 
 export interface ServerPlayer {
   id: string;
   token: string;
   socketId: string | null;
+  /** kapan terputus (null = tersambung) */
+  disconnectedAt: number | null;
   name: string;
   character: string;
   slot: number;
@@ -64,6 +68,7 @@ export class Room {
   private chargeStart = new Map<string, number>();
   /** lemparan baru boleh diproses setelah animasi giliran sebelumnya kira-kira selesai */
   private canRollAt = 0;
+  private turnDeadline = 0;
 
   constructor(
     readonly code: string,
@@ -117,6 +122,7 @@ export class Room {
       id: randomBytes(4).toString('hex'),
       token: randomBytes(16).toString('hex'),
       socketId,
+      disconnectedAt: null,
       name: this.uniqueName(rawName),
       character: this.freeCharacter(character),
       slot,
@@ -206,13 +212,14 @@ export class Room {
     const p = this.player(id);
     if (!p) return;
     p.socketId = null;
+    p.disconnectedAt = Date.now();
     p.ready = false;
     if (this.phase === 'lobby') {
       // beri waktu menyambung ulang (mis. refresh halaman) sebelum slotnya dilepas
       this.graceTimers.set(id, setTimeout(() => this.remove(id), LOBBY_GRACE_MS));
-    } else if (this.phase === 'playing' && this.state && this.state.players[this.state.current].id === id) {
-      this.scheduleTurn(0); // giliran pemain yang terputus dimainkan otomatis
     }
+    // saat bermain: pewaktu giliran yang sedang berjalan tetap dipakai, jadi pemain yang tak sengaja
+    // menutup tab punya waktu kembali; lewat masa tenggang, giliran mereka dimainkan otomatis
     this.broadcastRoom();
     if (this.players.every((o) => o.socketId === null)) {
       this.emptyTimer = setTimeout(() => {
@@ -226,6 +233,7 @@ export class Room {
     const p = this.player(id);
     if (!p) return null;
     p.socketId = socketId;
+    p.disconnectedAt = null;
     this.clearGrace(id);
     this.cancelEmptyTimer();
     this.broadcastRoom();
@@ -234,10 +242,12 @@ export class Room {
 
   /** Kirim state terbaru ke satu pemain yang baru menyambung ulang. */
   resync(p: ServerPlayer): void {
-    if (this.phase === 'playing' && this.state) {
+    if ((this.phase === 'playing' || this.phase === 'finished') && this.state) {
       this.to(p, { t: 'game_snapshot', state: this.state, seq: this.seq });
-      const cur = this.state.players[this.state.current];
-      this.to(p, { t: 'turn', playerId: cur.id, deadline: Date.now() + ms(TURN_SECONDS * 1000) });
+      if (this.phase === 'playing') {
+        const cur = this.state.players[this.state.current];
+        this.to(p, { t: 'turn', playerId: cur.id, deadline: this.turnDeadline || Date.now() + ms(TURN_SECONDS * 1000) });
+      }
     }
   }
 
@@ -362,9 +372,10 @@ export class Room {
     this.stopTurn();
     const cur = s.players[s.current];
     const p = this.player(cur.id);
-    const away = !p || p.socketId === null;
-    const wait = away ? animMs + ms(1200) : animMs + ms(TURN_SECONDS * 1000);
-    this.broadcast({ t: 'turn', playerId: cur.id, deadline: Date.now() + wait });
+    const gone = !p || (p.disconnectedAt !== null && Date.now() - p.disconnectedAt > ms(RECONNECT_GRACE_MS));
+    const wait = gone ? animMs + ms(1200) : animMs + ms(TURN_SECONDS * 1000);
+    this.turnDeadline = Date.now() + wait;
+    this.broadcast({ t: 'turn', playerId: cur.id, deadline: this.turnDeadline });
     this.turnTimer = setTimeout(() => {
       this.turnTimer = null;
       this.doRoll(cur.id, false);

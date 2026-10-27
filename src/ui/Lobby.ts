@@ -23,6 +23,8 @@ export class Lobby {
   private copied = '';
   private visible = false;
   private busy = false;
+  /** sedang mencoba masuk kembali ke room terakhir (setelah refresh / tab tertutup) */
+  private restoring = false;
 
   constructor(
     private net: NetworkClient,
@@ -39,6 +41,7 @@ export class Lobby {
     net.onStatus(() => this.render());
     net.on('joined', () => {
       this.busy = false;
+      this.restoring = false;
       this.render();
     });
     net.on('room_state', () => this.render());
@@ -46,8 +49,17 @@ export class Lobby {
     net.on('error', ({ message, code }) => {
       this.busy = false;
       if (code !== 'rejoin_failed') this.showError(message);
-      else this.render();
+      else {
+        this.restoring = false;
+        this.render();
+      }
     });
+  }
+
+  /** Tampilkan layar "menyambungkan kembali" alih-alih form buat/gabung room. */
+  setRestoring(v: boolean): void {
+    this.restoring = v;
+    this.render();
   }
 
   show(prefillCode?: string): void {
@@ -96,7 +108,7 @@ export class Lobby {
       'div',
       { class: 'lobby-card' },
       this.statusBar(),
-      room ? this.roomView(room) : this.entryView(),
+      room ? this.roomView(room) : this.restoring ? this.restoringView() : this.entryView(),
       this.error ? h('div', { class: 'lobby-error', role: 'alert' }, this.error) : null,
     );
     // pertahankan fokus & posisi kursor pada input saat re-render
@@ -147,6 +159,29 @@ export class Lobby {
           c.emoji,
         );
       }),
+    );
+  }
+
+  private restoringView(): HTMLElement {
+    return h(
+      'div',
+      { class: 'lobby-body restoring' },
+      h('div', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('h3', null, t('net.restoring')),
+      h('p', { class: 'hint' }, t('net.restoringSub')),
+      h(
+        'button',
+        {
+          class: 'btn',
+          onclick: () => {
+            this.restoring = false;
+            this.net.leave();
+            this.cb.onBack();
+          },
+        },
+        icon('back'),
+        t('setup.back'),
+      ),
     );
   }
 

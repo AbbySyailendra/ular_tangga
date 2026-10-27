@@ -61,6 +61,7 @@ export type ClientMsg =
   | { t: 'charge_start' }
   | { t: 'roll' }
   | { t: 'emote'; id: string }
+  | { t: 'sync' } // minta snapshot terbaru (mis. setelah tab lama di latar belakang)
   | { t: 'back_to_lobby' }
   | { t: 'leave' };
 
